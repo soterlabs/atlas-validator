@@ -900,6 +900,80 @@ function validateDocumentOrder(docs: Document[]): ValidationIssue[] {
   return issues;
 }
 
+/**
+ * Validate that every in-Atlas cross-reference resolves to a real document.
+ *
+ * Atlas cross-references are markdown links whose target is a bare UUID:
+ *   [A.1.2.3 - Some Document](8650a584-01f8-45d6-882b-c14eab9879c4)
+ *
+ * Two failure modes, neither previously detected:
+ *
+ *  1. UNRESOLVABLE TARGET. The UUID belongs to no document. This is what a
+ *     fabricated or mistyped reference looks like, and it is invisible on
+ *     inspection because it still renders as a working-looking link. Error.
+ *
+ *  2. STALE LABEL. The target resolves, but the link text names a different
+ *     document number than the target actually has -- the signature of a
+ *     renumbering that moved a document without updating text pointing at it.
+ *     The link still works; it just lies about where it goes. Warning, so that
+ *     unusual-but-legitimate link text cannot fail a build.
+ *
+ * Only bare-UUID targets are considered; external URLs are out of scope.
+ */
+function validateCrossReferences(lines: string[], docs: Document[]): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+
+  const byUuid = new Map<string, Document>();
+  for (const doc of docs) {
+    if (doc.uuid && !byUuid.has(doc.uuid)) byUuid.set(doc.uuid, doc);
+  }
+
+  const LINK_RE = /\[([^\]]*)\]\(([^)\s]+)\)/g;
+  const LABEL_RE = /^([A-Z](?:\.\d+)+)\s+-\s+/;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.includes('](')) continue;
+
+    LINK_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = LINK_RE.exec(line)) !== null) {
+      const text = m[1];
+      const target = m[2];
+
+      if (!UUID_REGEX.test(target)) continue;
+
+      const targetDoc = byUuid.get(target);
+
+      if (!targetDoc) {
+        issues.push({
+          line: i + 1,
+          severity: 'error',
+          message: `\u{1F517} Cross-reference points at a UUID that is not any document: ${target}`,
+          found: `Link text: "${text}"`,
+          action:
+            'Look up the real UUID of the document being referenced and use that. A reference to a ' +
+            'nonexistent UUID still renders as a link, so this cannot be caught by reading the diff.',
+        });
+        continue;
+      }
+
+      const label = text.match(LABEL_RE);
+      if (label && label[1] !== targetDoc.docNo) {
+        issues.push({
+          line: i + 1,
+          severity: 'warning',
+          message: `\u{1F517} Cross-reference label says ${label[1]} but the target is ${targetDoc.docNo}`,
+          found: `Link text: "${text}"\nTarget ${target} is ${targetDoc.docNo} - ${targetDoc.name} (line ${targetDoc.line})`,
+          action: `Update the link text to "${targetDoc.docNo} - ${targetDoc.name}", or point the link at the intended document.`,
+        });
+      }
+    }
+  }
+
+  return issues;
+}
+
 function validate(content: string): ValidationIssue[] {
   const lines = content.split(/\r?\n/);
   const issues: ValidationIssue[] = [];
@@ -933,6 +1007,7 @@ function validate(content: string): ValidationIssue[] {
 
   issues.push(...validateNesting(docs));
   issues.push(...validateUUIDs(docs));
+  issues.push(...validateCrossReferences(lines, docs));
   issues.push(...validateDocumentNumberUniqueness(docs));
   issues.push(...validateDocumentOrder(docs));
 
