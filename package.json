@@ -5,7 +5,8 @@
   "main": "validate-atlas-markdown.ts",
   "type": "module",
   "scripts": {
-    "validate": "tsx validate-atlas-markdown.ts"
+    "validate": "tsx validate-atlas-markdown.ts",
+    "test": "tsx test/document-order.test.ts"
   },
   "keywords": [
     "markdown",
