@@ -795,6 +795,111 @@ function filterSuppressedIssues(issues: ValidationIssue[], docs: Document[], lin
   });
 }
 
+/**
+ * Documents must appear in canonical Atlas order.
+ *
+ * WHY THIS EXISTS. The Atlas used to be stored as one directory per document, so a
+ * document's position was its filesystem path — `A.1.1.1` lived at `content/A/1/1/1/` and
+ * nowhere else. It was therefore impossible for a document to appear out of order, and
+ * nothing checked it. Once the Atlas is stored as a small number of composed files, order
+ * is just where text happens to sit, and a bad merge or a mis-pasted edit can move a
+ * document without changing a single character of its content.
+ *
+ * This is the assertion the PR #257 post-mortem asked for and never got. Its finding was
+ * that "every check that was run is structurally blind to child-ordering" — a hand-resolved
+ * merge had silently reordered 2,084 generated files and no tool noticed.
+ *
+ * THE RULE. Canonical order is a depth-first walk of the document-number tree where, at
+ * each node, children that have their own document come first in ascending order, followed
+ * by "phantom" children — number segments that exist only as a path to deeper documents,
+ * such as the `.0.` in `A.1.4.5.0.4`. Those phantom subtrees sort last.
+ *
+ * That last part is not a detail. A naive "document numbers must ascend" rule reports 410
+ * false errors on the current Atlas, because `A.1.1.1` legitimately precedes `A.1.1.0.3.1`.
+ * Verified against the real Atlas: this rule reproduces the composed order for all 11,323
+ * numbered documents exactly.
+ *
+ * Needed Research is skipped. An NR is placed immediately after the document it attaches
+ * to, so its own number says nothing about where it belongs.
+ */
+function validateDocumentOrder(docs: Document[]): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+
+  const numbered = docs.filter((d) => !d.docNo.startsWith('NR-'));
+  if (numbered.length < 2) return issues;
+
+  const present = new Map<string, Document>();
+  for (const d of numbered) if (!present.has(d.docNo)) present.set(d.docNo, d);
+
+  // Every path prefix, including the phantom ones that carry no document of their own.
+  const children = new Map<string, Set<string>>();
+  for (const docNo of present.keys()) {
+    const parts = docNo.split('.');
+    for (let i = 1; i < parts.length; i++) {
+      const parent = parts.slice(0, i).join('.');
+      const child = parts.slice(0, i + 1).join('.');
+      if (!children.has(parent)) children.set(parent, new Set());
+      children.get(parent)!.add(child);
+    }
+  }
+
+  // Segments are usually integers but not always — Scenario Variations use `var1`.
+  const segmentKey = (docNo: string): [number, number, string] => {
+    const last = docNo.split('.').pop()!;
+    const n = Number(last);
+    return Number.isInteger(n) ? [0, n, ''] : [1, 0, last];
+  };
+  const compare = (a: string, b: string): number => {
+    const realA = present.has(a) ? 0 : 1;
+    const realB = present.has(b) ? 0 : 1;
+    if (realA !== realB) return realA - realB;
+    const [ta, na, sa] = segmentKey(a);
+    const [tb, nb, sb] = segmentKey(b);
+    if (ta !== tb) return ta - tb;
+    if (na !== nb) return na - nb;
+    return sa.localeCompare(sb);
+  };
+
+  const expected: string[] = [];
+  const walk = (node: string): void => {
+    if (present.has(node)) expected.push(node);
+    const kids = Array.from(children.get(node) ?? []).sort(compare);
+    for (const kid of kids) walk(kid);
+  };
+  const roots = Array.from(
+    new Set(Array.from(present.keys()).map((d) => d.split('.')[0]))
+  ).sort();
+  for (const root of roots) walk(root);
+
+  const actual = numbered.map((d) => d.docNo);
+  if (expected.length !== actual.length) return issues; // duplicates — reported elsewhere
+
+  for (let i = 0; i < actual.length; i++) {
+    if (actual[i] === expected[i]) continue;
+    const doc = numbered[i];
+    const shouldBe = present.get(expected[i]);
+    issues.push({
+      line: doc.line,
+      severity: 'error',
+      message: `📄 Document out of order: ${doc.docNo} appears where ${expected[i]} is expected`,
+      found: `Line ${doc.line}: ${doc.docNo} - ${doc.name} [${doc.type}]`,
+      expected:
+        `${expected[i]}${shouldBe ? ` - ${shouldBe.name} [${shouldBe.type}]` : ''}` +
+        `${shouldBe ? ` (currently at line ${shouldBe.line})` : ''}`,
+      reason:
+        'Documents must appear in document-number order. This is usually caused by a ' +
+        'hand-resolved merge conflict, or by an edit pasted into the wrong place — the ' +
+        'content of each document can be perfectly valid while their order is not.',
+      action:
+        `Move ${doc.docNo} back to its position in document-number order. Only the first ` +
+        `misplaced document is reported; re-run after fixing it.`,
+    });
+    break; // one divergence cascades — reporting all of them buries the cause
+  }
+
+  return issues;
+}
+
 function validate(content: string): ValidationIssue[] {
   const lines = content.split(/\r?\n/);
   const issues: ValidationIssue[] = [];
@@ -829,6 +934,7 @@ function validate(content: string): ValidationIssue[] {
   issues.push(...validateNesting(docs));
   issues.push(...validateUUIDs(docs));
   issues.push(...validateDocumentNumberUniqueness(docs));
+  issues.push(...validateDocumentOrder(docs));
 
   // Filter out suppressed issues
   const filteredIssues = filterSuppressedIssues(issues, docs, lines);

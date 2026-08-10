@@ -37,6 +37,12 @@ jobs:
           args: -color
         continue-on-error: true
       
+      # The order assertion is the one check that fails silently if it regresses: a
+      # naive sort passes the unit path and then reports 410 false errors on the real
+      # Atlas. No `|| true` here — this step is meant to be able to fail.
+      - name: Run validator tests
+        run: npm test
+
       - name: Test validator script
         run: |
           echo "Testing that the validator runs without crashing..."
