@@ -715,9 +715,9 @@ function validateUUIDs(docs: Document[]): ValidationIssue[] {
     if (!uuid || uuid.trim() === '') {
       issues.push({
         line: doc.line,
-        severity: 'warning',
+        severity: 'error',
         message: '🆔 UUID is empty',
-        action: 'Generate a new UUID for this document at https://www.uuidgenerator.net/',
+        action: 'Generate a new UUID for this document (`uuidgen`), or at https://www.uuidgenerator.net/',
       });
       continue;
     }
